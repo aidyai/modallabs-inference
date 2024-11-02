@@ -1,0 +1,5 @@
+modelscope 
+transformers 
+sentencepiece 
+accelerate 
+bitsandbytes
