@@ -324,3 +324,103 @@ if not os.path.exists(IMAGE_FOLDER):
 
 # Call the function from data.py to process and format the dataset
 format2json(DATASET_NAME, JSON_FILE, IMAGE_FOLDER)
+
+
+import io
+from pathlib import Path
+import modal
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse
+from modal import App, Image, build, gpu, web_endpoint
+
+caption_gen = (
+    Image.debian_slim(python_version="3.10")
+    .apt_install("libglib2.0-0", "libsm6", "libxrender1", "libxext6", "ffmpeg", "libgl1")
+    .pip_install(
+        "torch==2.1.2",
+        "transformers==4.39.3",
+        "hf-transfer==0.1.6",
+        "huggingface_hub==0.22.2",
+        "accelerate",
+        "bitsandbytes",
+        "ray",
+        "pillow"
+    )
+)
+
+app = modal.App("caption-gen")
+
+@app.cls(gpu="T4", image=caption_gen)
+class Model:
+    
+    @build()
+    def build(self):
+        import os
+        from huggingface_hub import snapshot_download
+
+        MODEL_DIR = "/llava"
+        MODEL_NAME = "llava-hf/llava-v1.6-mistral-7b-hf"
+        MODEL_REVISION = "a1d521368f8d353afa4da2ed2bb1bf646ef1ff5f"
+
+        os.makedirs(MODEL_DIR, exist_ok=True)
+
+        snapshot_download(
+            MODEL_NAME,
+            revision=MODEL_REVISION,
+            local_dir=MODEL_DIR,
+            ignore_patterns=["*.pt", "*.bin"],  # Using safetensors
+        )
+    
+    @modal.enter()
+    def start_engine(self):
+        import torch
+        from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
+
+        self.model_id = "llava-hf/llava-v1.6-mistral-7b-hf"
+        self.processor = LlavaNextProcessor.from_pretrained(self.model_id)
+        self.model = LlavaNextForConditionalGeneration.from_pretrained(
+            self.model_id,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+            load_in_4bit=True
+        )
+
+    @modal.method()
+    async def inference(self, image_data, prompt):
+        import torch
+        from PIL import Image
+
+        # Loading Image
+        def load_img(file_data):
+            try:
+                image = Image.open(io.BytesIO(file_data)).convert('RGB')
+                return image
+            except Exception as e:
+                raise ValueError("Invalid image data") from e
+
+        image = load_img(await image_data.read())  # Open the image
+        inputs = self.processor(prompt, image, return_tensors="pt").to("cuda:0")  # Prepare the inputs
+        output = self.model.generate(**inputs, max_new_tokens=640)  # Generate output
+        decoded_output = self.processor.decode(output[0], skip_special_tokens=True)  # Decode output
+        return decoded_output
+
+@app.function(image=caption_gen,)
+@web_endpoint(method="POST")
+async def img_ttxt(image: UploadFile = File(...), prompt: str = Form(...)):
+    try:
+        if image.content_type not in ["image/jpeg", "image/png"]:
+            raise HTTPException(status_code=400, detail="Invalid image format")
+
+        #model = Model()
+        #caption = await model.inference(image, prompt)
+        caption = Model().inference.remote(image, prompt)
+
+
+
+
+        # Return the result
+        return JSONResponse(content={"caption": caption})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+    finally:
+        await image.close()
