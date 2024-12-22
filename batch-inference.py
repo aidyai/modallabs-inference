@@ -12,7 +12,7 @@ from decord import VideoReader, cpu
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
-from utils.proc import build_transform, find_closest_aspect_ratio, dynamic_preprocess, dynamic_preprocess2, load_image, load_image2 
+# from utils.proc import build_transform, find_closest_aspect_ratio, dynamic_preprocess, dynamic_preprocess2, load_image, load_image2 
 
 
 ocr_gen = (
